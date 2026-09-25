@@ -1,36 +1,26 @@
 #pragma once
-#include "../../dependencies/colors.h"
-#include "../../dependencies/json.hpp"
-#include <curl/curl.h>
 
-#include "filesystem"
-#include "fstream"
-#include "string"
-#include <chrono>
-#include <format>
-#include <iomanip>
-#include <iostream>
-#include <openssl/bio.h>
-#include <openssl/buffer.h>
-#include <openssl/evp.h>
-#include <openssl/sha.h>
-#include <regex>
-#include <thread>
+#include <string>
 
-#include <algorithm>
-#include <random>
-
-using namespace std;
-using namespace nlohmann;
-
+/// Small wrappers around the OpenSSL primitives the PKCE flow needs.
+///
+/// This header used to be the project's de-facto "include everything" header:
+/// every translation unit that touched a string ended up pulling in libcurl,
+/// nlohmann/json, `<regex>`, `<thread>` and `using namespace std` along with
+/// it. It now declares only what it owns, and includes only what it uses.
 namespace Crypto {
 
-// 43
-string generateRandomString(int lenght = 56, bool specialChars = true);
+/// Random string of `length` characters.
+///
+/// `specialChars` adds the two URL-safe punctuation characters the PKCE spec
+/// allows ("-", "_"); the default alphabet is alphanumeric only.
+std::string generateRandomString(int length = 56, bool specialChars = true);
 
-string base64_url_encode(const string &input);
+/// Base64 encoding using the URL-safe alphabet, without padding:
+/// '+' becomes '-', '/' becomes '_', and trailing '=' are stripped.
+std::string base64UrlEncode(const std::string &input);
 
-string sha256_base64url(const std::string &input);
+/// SHA-256 digest of `input`, base64url-encoded without padding.
+std::string sha256Base64Url(const std::string &input);
 
-string sha256(const string &input);
 } // namespace Crypto

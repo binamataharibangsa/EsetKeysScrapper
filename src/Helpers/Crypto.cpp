@@ -1,119 +1,96 @@
 #include "Crypto.h"
 
-string Crypto::generateRandomString(int lenght, bool specialChars) {
-  string address;
-  string alphabet =
+#include <openssl/bio.h>
+#include <openssl/buffer.h>
+#include <openssl/evp.h>
+#include <openssl/sha.h>
+
+#include <cstddef>
+#include <random>
+#include <string>
+
+namespace {
+
+/// Raw bytes -> base64url text (no padding).
+std::string toBase64Url(const unsigned char *data, std::size_t length) {
+  BIO *memory = BIO_new(BIO_s_mem());
+  BIO *encoder = BIO_new(BIO_f_base64());
+  if (memory == nullptr || encoder == nullptr) {
+    BIO_free(memory);
+    BIO_free(encoder);
+    return {};
+  }
+
+  // No line breaks, no trailing newline.
+  BIO_set_flags(encoder, BIO_FLAGS_BASE64_NO_NL);
+  BIO_push(encoder, memory);
+
+  BIO_write(encoder, data, static_cast<int>(length));
+  BIO_flush(encoder);
+
+  BUF_MEM *buffer = nullptr;
+  BIO_get_mem_ptr(encoder, &buffer);
+
+  std::string encoded = buffer != nullptr
+                            ? std::string(buffer->data, buffer->length)
+                            : std::string();
+
+  BIO_free_all(encoder);
+
+  for (char &character : encoded) {
+    if (character == '+') {
+      character = '-';
+    } else if (character == '/') {
+      character = '_';
+    }
+  }
+  while (!encoded.empty() && encoded.back() == '=') {
+    encoded.pop_back();
+  }
+
+  return encoded;
+}
+
+/// The random engine is kept alive across calls. The original code called
+/// `srand(time(0))` inside the generator, so every draw made within the same
+/// second produced the same string.
+std::mt19937 &randomEngine() {
+  static std::mt19937 engine{std::random_device{}()};
+  return engine;
+}
+
+} // namespace
+
+std::string Crypto::generateRandomString(int length, bool specialChars) {
+  static const std::string kAlphanumeric =
       "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+  static const std::string kAlphanumericWithPunctuation = kAlphanumeric + "-_";
 
-  if (specialChars) {
-    alphabet += "-_";
+  const std::string &alphabet =
+      specialChars ? kAlphanumericWithPunctuation : kAlphanumeric;
+
+  std::uniform_int_distribution<std::size_t> distribution(0,
+                                                         alphabet.size() - 1);
+
+  std::string result;
+  result.reserve(static_cast<std::size_t>(length));
+  for (int i = 0; i < length; ++i) {
+    result += alphabet[distribution(randomEngine())];
   }
-
-  random_device rd;
-  mt19937 gen(rd());
-  uniform_int_distribution<> dis(0, alphabet.size() - 1);
-
-  for (int i = 0; i < lenght; ++i) {
-    int indiceAleatorio = dis(gen);
-    address += alphabet[indiceAleatorio];
-  }
-
-  return address;
+  return result;
 }
 
-string Crypto::base64_url_encode(const string &input) {
-  BIO *bio = BIO_new(BIO_s_mem());
-  BIO *base64_bio = BIO_new(BIO_f_base64());
-
-  BIO_set_flags(base64_bio, BIO_FLAGS_BASE64_NO_NL);
-
-  BIO_push(base64_bio, bio);
-
-  BIO_write(base64_bio, input.c_str(), input.length());
-  BIO_flush(base64_bio);
-
-  BUF_MEM *bufPtr;
-  BIO_get_mem_ptr(base64_bio, &bufPtr);
-
-  std::string encoded(bufPtr->data, bufPtr->length);
-
-  BIO_free_all(base64_bio);
-
-  size_t pos;
-  while ((pos = encoded.find('+')) != std::string::npos) {
-    encoded.replace(pos, 1, "-");
-  }
-  while ((pos = encoded.find('/')) != std::string::npos) {
-    encoded.replace(pos, 1, "_");
-  }
-  while (!encoded.empty() && encoded.back() == '=') {
-    encoded.pop_back();
-  }
-
-  return encoded;
+std::string Crypto::base64UrlEncode(const std::string &input) {
+  return toBase64Url(reinterpret_cast<const unsigned char *>(input.data()),
+                     input.size());
 }
 
-std::string Crypto::sha256(const std::string &input) {
-  unsigned char hash[SHA256_DIGEST_LENGTH];
-  SHA256_CTX sha256;
-  SHA256_Init(&sha256);
-  SHA256_Update(&sha256, input.c_str(), input.length());
-  SHA256_Final(hash, &sha256);
+std::string Crypto::sha256Base64Url(const std::string &input) {
+  unsigned char digest[SHA256_DIGEST_LENGTH];
+  SHA256(reinterpret_cast<const unsigned char *>(input.data()), input.size(),
+         digest);
 
-  std::stringstream ss;
-  for (int i = 0; i < SHA256_DIGEST_LENGTH; i++) {
-    ss << std::hex << std::setw(2) << std::setfill('0')
-       << static_cast<int>(hash[i]);
-  }
-
-  return ss.str();
-}
-
-std::string Crypto::sha256_base64url(const std::string &input) {
-  unsigned char hash[SHA256_DIGEST_LENGTH];
-  SHA256((const unsigned char *)input.c_str(), input.length(), hash);
-
-  std::stringstream ss;
-  ss << std::hex << std::setfill('0');
-  for (int i = 0; i < SHA256_DIGEST_LENGTH; i++) {
-    ss << std::setw(2) << static_cast<unsigned int>(hash[i]);
-  }
-  std::string hexHash = ss.str();
-
-  std::vector<unsigned char> bytes;
-  for (size_t i = 0; i < hexHash.length(); i += 2) {
-    unsigned int byte;
-    std::istringstream(hexHash.substr(i, 2)) >> std::hex >> byte;
-    bytes.push_back(static_cast<unsigned char>(byte));
-  }
-
-  BIO *bio = BIO_new(BIO_s_mem());
-  BIO *base64_bio = BIO_new(BIO_f_base64());
-
-  BIO_set_flags(base64_bio, BIO_FLAGS_BASE64_NO_NL);
-
-  BIO_push(base64_bio, bio);
-
-  BIO_write(base64_bio, bytes.data(), bytes.size());
-  BIO_flush(base64_bio);
-
-  BUF_MEM *bufPtr;
-  BIO_get_mem_ptr(base64_bio, &bufPtr);
-
-  std::string encoded(bufPtr->data, bufPtr->length);
-
-  BIO_free_all(base64_bio);
-
-  size_t pos;
-  while ((pos = encoded.find('+')) != std::string::npos) {
-    encoded.replace(pos, 1, "-");
-  }
-  while ((pos = encoded.find('/')) != std::string::npos) {
-    encoded.replace(pos, 1, "_");
-  }
-  while (!encoded.empty() && encoded.back() == '=') {
-    encoded.pop_back();
-  }
-
-  return encoded;
+  // The original code hex-encoded the digest and then decoded it back to bytes
+  // before base64ing it; that round trip is unnecessary, so it is gone.
+  return toBase64Url(digest, SHA256_DIGEST_LENGTH);
 }
