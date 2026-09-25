@@ -40,6 +40,14 @@ inline constexpr const char *kGetAllLicensesUrl =
 inline constexpr const char *kRegistrationCallbackUrl =
     "https://home.eset.com/callback";
 
+// --- OAuth / PKCE ----------------------------------------------------------
+// Public client id of the ESET web app the browser flow impersonates.
+inline constexpr const char *kPkceClientId = "myeset";
+// Base the authorization URL is relative to.
+inline constexpr const char *kLoginHostUrl = "https://login.eset.com";
+// Prefix prepended to the `redirectUrl` returned by the login endpoint.
+inline constexpr const char *kPkceRedirectPrefix = "https://login.eset.com";
+
 // --- Activation e-mail -----------------------------------------------------
 inline constexpr const char *kConfirmationSender = "info@product.eset.com";
 inline constexpr const char *kConfirmationSubject = "Account confirmation";
@@ -54,12 +62,21 @@ inline constexpr const char *kMailMessagesPath = "/messages?page=1";
 // --- HTTP ------------------------------------------------------------------
 inline constexpr long kRequestTimeoutSeconds = 15;
 inline constexpr const char *kAcceptEncoding = "UTF-8";
+// Timeout for the throwaway "is this proxy alive?" request. Shorter than a
+// normal request because a dead proxy in a long list should be skipped fast.
+inline constexpr long kProxyProbeTimeoutSeconds = 15;
+inline constexpr const char *kProxyProbeUrl = "http://google.com/";
 
 // --- Retry policy and pacing ----------------------------------------------
 inline constexpr int kMaxAccountCreationAttempts = 5;
 inline constexpr int kMaxLicenseAttempts = 5;
 inline constexpr int kMaxAddressGenerationAttempts = 20;
 inline constexpr int kMaxTokenAttempts = 5;
+// Upper bound on how many proxies are scanned for a working one per account.
+inline constexpr int kMaxProxyAttempts = 20;
+// How many times to poll the mailbox for the confirmation mail before giving
+// up on an account.
+inline constexpr int kMaxActivationAttempts = 30;
 // Pause between "has the activation mail arrived yet?" polls.
 inline constexpr int kActivationPollDelayMs = 100;
 // Pause after a rejected mailbox creation / token request.

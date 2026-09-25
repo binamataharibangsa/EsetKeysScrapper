@@ -51,15 +51,17 @@ std::string toBase64Url(const unsigned char *data, std::size_t length) {
   return encoded;
 }
 
-/// The random engine is kept alive across calls. The original code called
-/// `srand(time(0))` inside the generator, so every draw made within the same
-/// second produced the same string.
-std::mt19937 &randomEngine() {
+} // namespace
+
+std::mt19937 &Crypto::randomEngine() {
+  // Kept alive across calls, seeded once from random_device.
+  //
+  // The original called `srand(time(0))` inside the generator, so every draw
+  // made within the same second produced the same string -- which silently
+  // broke the uniqueness of both the PKCE values and the mailbox addresses.
   static std::mt19937 engine{std::random_device{}()};
   return engine;
 }
-
-} // namespace
 
 std::string Crypto::generateRandomString(int length, bool specialChars) {
   static const std::string kAlphanumeric =
@@ -68,6 +70,10 @@ std::string Crypto::generateRandomString(int length, bool specialChars) {
 
   const std::string &alphabet =
       specialChars ? kAlphanumericWithPunctuation : kAlphanumeric;
+
+  if (length <= 0) {
+    return {};
+  }
 
   std::uniform_int_distribution<std::size_t> distribution(0,
                                                          alphabet.size() - 1);
@@ -90,7 +96,7 @@ std::string Crypto::sha256Base64Url(const std::string &input) {
   SHA256(reinterpret_cast<const unsigned char *>(input.data()), input.size(),
          digest);
 
-  // The original code hex-encoded the digest and then decoded it back to bytes
+  // The original hex-encoded the digest and then decoded it back to bytes
   // before base64ing it; that round trip is unnecessary, so it is gone.
   return toBase64Url(digest, SHA256_DIGEST_LENGTH);
 }

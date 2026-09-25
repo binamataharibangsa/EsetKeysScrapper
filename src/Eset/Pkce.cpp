@@ -1,26 +1,46 @@
 #include "Pkce.h"
 
-Pkce::Pkce() { this->regenerate(); }
+#include "Core/Config.h"
+#include "Helpers/Crypto.h"
 
-Pkce::~Pkce() {}
+#include <string>
 
-string Pkce::getAuthorizationUrl() {
-  this->regenerate();
-  return "/connect/authorize/"
-         "callback?client_id=myeset&redirect_uri=https://home.eset.com/"
-         "callback&response_type=code&scope=openid mecac "
-         "myesetapi&state=" +
-         this->state +
-         "&code_"
-         "challenge=" +
-         this->code_challenge +
-         "&code_"
-         "challenge_method=S256&response_mode=query";
+namespace {
+
+/// Lengths from RFC 7636: the verifier must be 43-128 characters, and the
+/// state is only required to be unguessable.
+constexpr int kStateLength = 32;
+constexpr int kRandomStringLength = 56;
+
+} // namespace
+
+Pkce::Pkce() { regenerate(); }
+
+std::string Pkce::getAuthorizationUrl() {
+  regenerate();
+
+  // Assembled from a single concatenation so the query string reads the way it
+  // appears on the wire; the original split it mid-parameter ("code_" +
+  // "challenge"), which made the URL impossible to check by eye.
+  return std::string("/connect/authorize/callback") +
+         "?client_id=" + config::kPkceClientId +
+         "&redirect_uri=" + config::kRegistrationCallbackUrl +
+         "&response_type=code" +
+         "&scope=openid mecac myesetapi" +
+         "&state=" + state_ +
+         "&code_challenge=" + codeChallenge_ +
+         "&code_challenge_method=S256" +
+         "&response_mode=query";
 }
 
 void Pkce::regenerate() {
-  this->randomString = Crypto::generateRandomString();
-  this->state = Crypto::generateRandomString(32, false);
-  this->code_verifier = Crypto::base64_url_encode(randomString);
-  this->code_challenge = Crypto::sha256_base64url(code_verifier);
+  // A fresh random string per pair. The original generated one string in the
+  // constructor and re-encoded that same string on every regenerate(), so the
+  // verifier never actually changed between logins.
+  const std::string verifierSource =
+      Crypto::generateRandomString(kRandomStringLength);
+
+  state_ = Crypto::generateRandomString(kStateLength, false);
+  codeVerifier_ = Crypto::base64UrlEncode(verifierSource);
+  codeChallenge_ = Crypto::sha256Base64Url(codeVerifier_);
 }

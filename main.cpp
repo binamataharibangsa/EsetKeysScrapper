@@ -1,104 +1,155 @@
 #include "dependencies/cxxopts.hpp"
+
+#include "Helpers/Console.h"
+#include "src/Core/Config.h"
+#include "src/I18n/I18n.h"
 #include "src/LicenseManager.h"
 
-#define version "1.3"
-
-#if _WIN32 || _WIN64
+#include <cstdlib>
+#include <exception>
 #include <iostream>
+#include <string>
+
+#if defined(_WIN32)
 #include <windows.h>
+#endif
 
-void enableANSIColors() {
-  HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
-  if (hOut == INVALID_HANDLE_VALUE)
+namespace {
+
+/// Derived from the central version string instead of a bare `#define version`,
+/// which shadowed <version> and any variable of that name for every file that
+/// included this translation unit.
+constexpr const char *kVersion = config::kAppVersion;
+
+#if defined(_WIN32)
+/// Enables ANSI escape processing. Without this the colour codes print as
+/// literal text in the legacy console host.
+void enableAnsiColors() {
+  HANDLE console = GetStdHandle(STD_OUTPUT_HANDLE);
+  if (console == INVALID_HANDLE_VALUE) {
     return;
+  }
 
-  DWORD dwMode = 0;
-  if (!GetConsoleMode(hOut, &dwMode))
+  DWORD mode = 0;
+  if (!GetConsoleMode(console, &mode)) {
     return;
+  }
 
-  dwMode |= ENABLE_VIRTUAL_TERMINAL_PROCESSING;
-  SetConsoleMode(hOut, dwMode);
+  SetConsoleMode(console, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
 }
 #endif
 
-int main(int argc, char *argv[]) {
-
-  cout << CYAN << R"(
-  ______          _   _  __               _____                                      
- |  ____|        | | | |/ /              / ____|                                     
- | |__   ___  ___| |_| ' / ___ _   _ ___| (___   ___ _ __ __ _ _ __  _ __   ___ _ __ 
+void printBanner() {
+  std::cout << CYAN << R"(
+  ______          _   _  __               _____
+ |  ____|        | | | |/ /              / ____|
+ | |__   ___  ___| |_| ' / ___ _   _ ___| (___   ___ _ __ __ _ _ __  _ __   ___ _ __
  |  __| / __|/ _ | __|  < / _ | | | / __|\___ \ / __| '__/ _` | '_ \| '_ \ / _ | '__|
- | |____\__ |  __| |_| . |  __| |_| \__ \____) | (__| | | (_| | |_) | |_) |  __| |   
- |______|___/\___|\__|_|\_\___|\__, |___|_____/ \___|_|  \__,_| .__/| .__/ \___|_|   
-                                __/ |                         | |   | |              
-                               |___/                          |_|   |_|              
+ | |____\__ |  __| |_| . |  __| |_| \__ \____) | (__| | | (_| | |_) | |_) |  __| |
+ |______|___/\___|\__|_|\_\___|\__, |___|_____/ \___|_|  \__,_| .__/| .__/ \___|_|
+                                __/ |                         | |   | |
+                               |___/                          |_|   |_|
 
+)" << RESET
+            << std::endl;
+}
 
-  )" << RESET
-       << endl;
+void printDisclaimer() {
+  using i18n::Key;
+  std::cout << RED << i18n::tr(Key::CliDisclaimerTitle) << std::endl
+            << i18n::tr(Key::CliDisclaimerBody) << RESET << std::endl
+            << GREEN << "\t" << config::kAppAuthor << "." << RESET << std::endl
+            << std::endl;
+}
 
-  cxxopts::Options options("EsetKeysScrapper",
-                           "A tool for extracting free licenses from Eset "
-                           "NOD32 antivirus accounts through web scraping");
+/// Applies the language chosen on the command line, falling back to the
+/// environment and then to English.
+void applyLanguage(const std::string &requested) {
+  using i18n::Lang;
+  using i18n::Translator;
 
-  int numLicenses = 1;
-  int domainLenght = 10;
-  string proxyFile = "";
+  const Lang lang =
+      requested.empty()
+          ? Translator::fromEnvironment()
+          : Translator::fromCode(requested, Translator::instance().language());
 
-  options.add_options()("h,help", "Show help")("v,version", "Show version")(
-      "n,number", "Number of licenses",
+  Translator::instance().setLanguage(lang);
+  std::cout << GREEN << i18n::tr(i18n::Key::CliLanguageSelected) << RESET
+            << Translator::displayName(lang) << std::endl;
+}
+
+} // namespace
+
+int main(int argc, char *argv[]) {
+#if defined(_WIN32)
+  enableAnsiColors();
+#endif
+
+  printBanner();
+
+  cxxopts::Options options(config::kAppName,
+                           i18n::tr(i18n::Key::CliDescription));
+
+  int numLicenses = config::kMinLicenseCount;
+  int domainLength = config::kDefaultDomainLength;
+  std::string proxyFile;
+  std::string language;
+
+  options.add_options()("h,help", i18n::tr(i18n::Key::CliOptHelp))(
+      "v,version", i18n::tr(i18n::Key::CliOptVersion))(
+      "n,number", i18n::tr(i18n::Key::CliOptNumber),
       cxxopts::value<int>(numLicenses)->default_value("1"))(
-      "l,length", "Domain lenght for temporal mails",
-      cxxopts::value<int>(domainLenght)->default_value("10"))(
-      "p,proxy", "Proxy List file (protocol://ip:port)",
-      cxxopts::value<string>(proxyFile));
+      "l,length", i18n::tr(i18n::Key::CliOptLength),
+      cxxopts::value<int>(domainLength)->default_value("10"))(
+      "p,proxy", i18n::tr(i18n::Key::CliOptProxy),
+      cxxopts::value<std::string>(proxyFile))(
+      "lang", i18n::tr(i18n::Key::CliOptLang),
+      cxxopts::value<std::string>(language));
 
   try {
+    const auto result = options.parse(argc, argv);
 
-#if _WIN32 || _WIN64
-    enableANSIColors();
-#endif
-
-    auto result = options.parse(argc, argv);
-
-    if (result.count("help")) {
-      cout << options.help() << std::endl;
-      return 0;
+    if (result.count("help") > 0) {
+      std::cout << options.help() << std::endl;
+      return EXIT_SUCCESS;
     }
 
-    if (result.count("version")) {
-      cout << "EsetKeysScrapper" << LGREEN << "v" << version << std::endl;
-      return 0;
+    if (result.count("version") > 0) {
+      std::cout << config::kAppName << LGREEN << "v" << kVersion << std::endl;
+      return EXIT_SUCCESS;
     }
 
-    cout << RED << "󰀦 DISCLAIMER:" << endl
-         << "󰀦 This tool is for educational purposes only. " << endl
-         << "Use at your own risk. I am not responsible for any damage caused "
-            "by the "
-            "use of this tool."
-         << RESET << endl;
-    cout << GREEN << "\t Xooter." << RESET << endl << endl;
+    // `--lang` is applied after parsing but before anything user-facing, so
+    // the disclaimer below already honours it. Help and version stay in the
+    // detected language because they are printed during parsing.
+    applyLanguage(language);
+    printDisclaimer();
 
-    numLicenses = numLicenses < 1 ? 1 : numLicenses;
+    LicenseManager manager(numLicenses, domainLength, proxyFile);
+    manager.generateLicenses();
 
-    domainLenght = domainLenght > 25 ? 25 : domainLenght;
-    domainLenght = domainLenght < 5 ? 5 : domainLenght;
+    std::cout << std::endl
+              << GREEN << "---" << RESET << std::endl
+              << GREEN << i18n::tr(i18n::Key::CliLicensesGenerated) << RESET
+              << std::endl
+              << std::endl;
+    manager.showAllLicenses();
 
-    LicenseManager licenseManager(numLicenses, domainLenght, proxyFile);
-
-    licenseManager.generateLicenses();
-
-    cout << endl << GREEN << "---" << RESET << endl;
-    cout << GREEN << "Licenses generated successfully" << RESET << endl << endl;
-    licenseManager.showAllLicenses();
-
-#if _WIN32 || _WIN64
-    getchar();
+#if defined(_WIN32)
+    // Keeps the console window open when the binary is double-clicked.
+    std::getchar();
 #endif
-  } catch (const bad_exception &e) {
-    cout << "Error parsing options: " << e.what() << std::endl;
-    return 1;
+  } catch (const cxxopts::exceptions::exception &e) {
+    // `bad_exception` was used before, which no option parser ever throws:
+    // a mistyped option therefore escaped main() and terminated the process
+    // with an unhandled exception instead of printing a message.
+    std::cout << i18n::tr(i18n::Key::CliErrorParsingOptions) << e.what()
+              << std::endl;
+    return EXIT_FAILURE;
+  } catch (const std::exception &e) {
+    std::cout << e.what() << std::endl;
+    return EXIT_FAILURE;
   }
 
-  return 0;
+  return EXIT_SUCCESS;
 }

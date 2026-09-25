@@ -1,5 +1,6 @@
 #pragma once
 
+#include <random>
 #include <string>
 
 /// Small wrappers around the OpenSSL primitives the PKCE flow needs.
@@ -9,6 +10,12 @@
 /// nlohmann/json, `<regex>`, `<thread>` and `using namespace std` along with
 /// it. It now declares only what it owns, and includes only what it uses.
 namespace Crypto {
+
+/// Process-wide Mersenne Twister used by every generator in the project.
+///
+/// Exposed so TempMail draws its mailbox addresses from the same engine
+/// instead of reseeding `rand()` on each call.
+std::mt19937 &randomEngine();
 
 /// Random string of `length` characters.
 ///

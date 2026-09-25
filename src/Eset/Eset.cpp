@@ -1,343 +1,398 @@
 #include "Eset.h"
 
-Eset::Eset(string mail, Proxy *proxy) : Scrapper() {
-  this->proxy = proxy;
-  this->mail = mail;
+#include "../Core/Config.h"
+#include "../Helpers/Paths.h"
+#include "../I18n/I18n.h"
 
-  const string url = getPath() + "eset_cookies.txt";
-  curl_easy_setopt(curl, CURLOPT_COOKIEJAR, url.c_str());
-  curl_easy_setopt(curl, CURLOPT_COOKIEFILE, url.c_str());
+#include <cctype>
+#include <cstddef>
+#include <regex>
+#include <string>
+#include <vector>
 
-  if (proxy != nullptr) {
+namespace {
 
-    cout << endl
-         << GREEN << "Using Proxy: " << YELLOW << proxy->toString() << RESET
-         << endl;
+/// The ESET account API is happiest when the request advertises itself as the
+/// registered web client, so these string literals are protocol, not style.
+const char *kSecChUa = "'Chromium';v='121', 'Not A(Brand';v='99'";
+const char *kAcceptJson = "application/json, text/plain, */*";
+const char *kAcceptHtml =
+    "text/html,application/xhtml+xml,application/xml;q=0.9,image/"
+    "avif,image/webp,image/apng,*/*;q=0.8,application/"
+    "signed-exchange;v=b3;q=0.7";
 
-    curl_easy_setopt(this->curl, CURLOPT_SSL_VERIFYPEER, 0L);
-    curl_easy_setopt(this->curl, CURLOPT_SSL_VERIFYHOST, 0L);
-    curl_easy_setopt(this->curl, CURLOPT_PROXYTYPE, CURLPROXY_HTTP);
-    if (proxy->protocol == "socks5") {
-      curl_easy_setopt(this->curl, CURLOPT_PROXYTYPE, CURLPROXY_SOCKS5);
-    } else if (proxy->protocol == "socks4") {
-      curl_easy_setopt(this->curl, CURLOPT_PROXYTYPE, CURLPROXY_SOCKS4);
-    }
+/// Hosts this class talks to, as they must appear in the Host: header.
+std::string hostHeader(const char *host) { return std::string("Host: ") + host; }
 
-    curl_easy_setopt(this->curl, CURLOPT_PROXY, this->proxy->ip.c_str());
-    curl_easy_setopt(this->curl, CURLOPT_PROXYPORT, this->proxy->port);
+} // namespace
+
+Eset::Eset(const std::string &mail, const Proxy *proxy)
+    : mail_(mail), proxy_(proxy) {
+  // One cookie jar per account. The original used a single shared
+  // "eset_cookies.txt" for every instance, so concurrent or sequential
+  // accounts overwrote each other's session cookies.
+  const std::string cookieJar =
+      dataFile(std::string(config::kCookieFilePrefix) + mail_ +
+               config::kCookieFileSuffix);
+  curl_easy_setopt(curl_, CURLOPT_COOKIEJAR, cookieJar.c_str());
+  curl_easy_setopt(curl_, CURLOPT_COOKIEFILE, cookieJar.c_str());
+
+  if (proxy_ != nullptr && proxy_->isValid()) {
+    std::cout << std::endl
+              << GREEN << i18n::tr(i18n::Key::UsingProxy) << YELLOW
+              << proxy_->toString() << RESET << std::endl;
+
+    curl_easy_setopt(curl_, CURLOPT_PROXYTYPE,
+                     proxy_->protocol() == "socks5"   ? CURLPROXY_SOCKS5
+                     : proxy_->protocol() == "socks4" ? CURLPROXY_SOCKS4
+                                                      : CURLPROXY_HTTP);
+    curl_easy_setopt(curl_, CURLOPT_PROXY, proxy_->host().c_str());
+    curl_easy_setopt(curl_, CURLOPT_PROXYPORT,
+                     static_cast<long>(proxy_->port()));
   }
 
-  this->setHeaders();
+  useLoginHeaders(false);
 }
 
-Eset::~Eset() {}
+bool Eset::createAccount() {
+  response.clear();
+  useLoginHeaders(true);
 
-bool Eset::CreateAccount() {
-  this->response.clear();
-  this->setHeaders(true);
+  // Built with the JSON API so the "selectedCountry is a string" quirk below
+  // is expressed as a type rather than a comment.
+  const json payload = {
+      {"wantReceiveNews", false},
+      {"password", config::kAccountPassword},
+      {"email", mail_},
+      {"selectedCountry", config::kSelectedCountry},
+      {"agreeWithTerms", true},
+      {"taskId", ""},
+      {"returnUrl", pkce_.getAuthorizationUrl()},
+      {"browserFingerprint", config::kBrowserFingerprint}};
+  const std::string body = payload.dump();
 
-  json postData = {{"wantReceiveNews", false},
-                   {"password", ESET_PASSWORD},
-                   {"email", this->mail},
-                   {"selectedCountry", "12"}, // must be a string LOL
-                   {"agreeWithTerms", true},
-                   {"taskId", ""},
-                   {"returnUrl", this->pkce.getAuthorizationUrl()},
-                   {"browserFingerprint", BROWSER_FINGERPRINT}};
+  curl_easy_setopt(curl_, CURLOPT_URL, config::kCreateAccountUrl);
+  curl_easy_setopt(curl_, CURLOPT_POST, 1L);
+  curl_easy_setopt(curl_, CURLOPT_POSTFIELDS, body.c_str());
 
-  string jsonBody = postData.dump();
-
-  curl_easy_setopt(this->curl, CURLOPT_URL, CREATE_ACCOUNT.c_str());
-  curl_easy_setopt(this->curl, CURLOPT_POST, 1L);
-  curl_easy_setopt(this->curl, CURLOPT_POSTFIELDS, jsonBody.c_str());
-
-  this->code = curl_easy_perform(this->curl);
-
-  if (this->code == CURLE_OK && !this->response.empty()) {
-    cout << endl
-         << YELLOW << "--- ESSET ACCOUNT CREATED ---" << endl
-         << GREEN << " Email: " << RESET << this->mail << endl
-         << GREEN << "󰟵 Password: " << RESET << ESET_PASSWORD << endl;
-
-    this->setHeaders(false);
-    return true;
-  }
-
-  return false;
-}
-
-bool Eset::ConfirmRegistration(string body) {
-  this->response.clear();
-
-  string url = getVerificationLink(body);
-  setHeaders(false, false);
-
-  curl_easy_setopt(this->curl, CURLOPT_URL, url.c_str());
-  curl_easy_setopt(this->curl, CURLOPT_HTTPGET, 1L);
-  curl_easy_setopt(this->curl, CURLOPT_FOLLOWLOCATION, 1L);
-
-  this->code = curl_easy_perform(this->curl);
-
-  if (this->response.find("We are sorry") != string::npos) {
-    cout << RED << " Verification Failed" << endl
-         << "󰑓 Retrying..." << endl;
+  const CURLcode result = perform();
+  if (result != CURLE_OK || response.empty()) {
     return false;
   }
 
-  if (this->code == CURLE_OK) {
-    cout << GREEN << " Verification Successful" << endl << endl;
+  std::cout << std::endl
+            << YELLOW << i18n::tr(i18n::Key::AccountCreated) << std::endl
+            << GREEN << i18n::tr(i18n::Key::LabelEmail) << RESET << mail_
+            << std::endl
+            << GREEN << i18n::tr(i18n::Key::LabelPassword) << RESET
+            << config::kAccountPassword << std::endl;
+
+  useLoginHeaders(false);
+  return true;
+}
+
+bool Eset::confirmRegistration(const std::string &body) {
+  response.clear();
+
+  const std::string url = extractVerificationLink(body);
+  if (url.empty()) {
+    return false;
+  }
+
+  useLoginHeaders(false);
+  curl_easy_setopt(curl_, CURLOPT_URL, url.c_str());
+  curl_easy_setopt(curl_, CURLOPT_HTTPGET, 1L);
+  curl_easy_setopt(curl_, CURLOPT_FOLLOWLOCATION, 1L);
+
+  const CURLcode result = perform();
+
+  if (response.find("We are sorry") != std::string::npos) {
+    std::cout << RED << i18n::tr(i18n::Key::VerificationFailed) << std::endl
+              << i18n::tr(i18n::Key::Retrying) << std::endl;
+    return false;
+  }
+
+  if (result == CURLE_OK) {
+    std::cout << GREEN << i18n::tr(i18n::Key::VerificationSuccessful)
+              << std::endl
+              << std::endl;
     return true;
   }
   return false;
 }
 
-string Eset::getVerificationLink(string body) {
-  regex linkRegex("\\[([^\\]]+)\\]");
-
-  smatch match;
-  if (regex_search(body, match, linkRegex)) {
-    if (match.size() > 1) {
-      string link = match.str(1);
-      return link;
-    }
+bool Eset::getLicense() {
+  if (token.empty() && !login()) {
+    return false;
   }
-  return "";
-}
 
-bool Eset::GetLicense() {
-  if (this->token == "") {
-    if (this->login())
-      cout << GREEN << " Logged in" << RESET << endl;
-    else {
-      cout << RED << " Login failed" << RESET << endl;
-      return false;
-    }
-  }
-  this_thread::sleep_for(chrono::milliseconds(100));
+  std::this_thread::sleep_for(
+      std::chrono::milliseconds(config::kActivationPollDelayMs));
 
   if (!activateLicense()) {
-    cout << RED << " Error activating license" << endl;
+    std::cout << RED << i18n::tr(i18n::Key::ErrorActivatingLicense)
+              << std::endl;
     return false;
   }
 
-  this->response.clear();
-  this->responseHeaders.clear();
-
-  this->headers = NULL;
-
-  headers = curl_slist_append(headers, "Host: home.eset.com");
-  string tokenHeader = "Authorization: Bearer " + this->token;
-  headers = curl_slist_append(headers, tokenHeader.c_str());
-
-  curl_easy_setopt(this->curl, CURLOPT_HTTPHEADER, headers);
-
-  curl_easy_setopt(this->curl, CURLOPT_URL, GET_All.c_str());
-  curl_easy_setopt(this->curl, CURLOPT_HTTPGET, 1L);
-
-  this->code = curl_easy_perform(this->curl);
-
-  if (this->response.length() < 3) {
-    cout << RED << " No license found" << endl;
-    return false;
-  }
-
-  if (this->code == CURLE_OK) {
-    const json jsonResponse = json::parse(this->response);
-
-    string license = jsonResponse[0]["licenseKey"];
-
-    cout << GREEN << "󰌆 License: " << RESET << license << endl;
-    this->license = license;
-    return true;
-  }
-
-  return false;
-}
-
-bool Eset::activateLicense() {
-  this->response.clear();
-
-  struct curl_slist *headers = NULL;
-
-  headers = curl_slist_append(headers, "Host: home.eset.com");
-  headers = curl_slist_append(headers, "Content-type: application/json");
-  headers = curl_slist_append(headers, "Accept: */*");
-  headers = curl_slist_append(headers, "x-eset-client-type: browser_desktop");
-  headers = curl_slist_append(headers, "x-eset-client-device-language: en-US");
-  headers = curl_slist_append(
-      headers, "Referer: https://home.eset.com/onboarding/trial-subscription");
-  string tokenHeader = "Authorization: Bearer " + this->token;
-  headers = curl_slist_append(headers, tokenHeader.c_str());
-
-  curl_easy_setopt(this->curl, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_2TLS);
-  curl_easy_setopt(this->curl, CURLOPT_HTTPHEADER, headers);
-
-  curl_easy_setopt(this->curl, CURLOPT_URL, ACTIVATE_lICENSE.c_str());
-  curl_easy_setopt(this->curl, CURLOPT_POST, 1L);
-
-  const string activateData = "{\"productCode\":\"148\"}";
-
-  curl_easy_setopt(this->curl, CURLOPT_POSTFIELDS, activateData.c_str());
-
-  this->code = curl_easy_perform(this->curl);
-  cout << this->response << endl;
-
-  if (this->code == CURLE_OK && this->response.find("!DOCTYPE") == string::npos)
-    return true;
-
-  return false;
+  return fetchLicenseKey();
 }
 
 bool Eset::login() {
-  this->response.clear();
+  response.clear();
 
-  const string hardcodedJson =
-      "{\"email\":\"" + this->mail + "\",\"password\":\"" + ESET_PASSWORD +
-      "\",\"returnUrl\":\"" + this->pkce.getAuthorizationUrl() +
-      "\",\"browserFingerprint\":\"" + BROWSER_FINGERPRINT + "\"}";
+  const json payload = {{"email", mail_},
+                        {"password", config::kAccountPassword},
+                        {"returnUrl", pkce_.getAuthorizationUrl()},
+                        {"browserFingerprint", config::kBrowserFingerprint}};
 
-  curl_easy_setopt(this->curl, CURLOPT_URL, LOGIN_ACCOUNT.c_str());
-  curl_easy_setopt(this->curl, CURLOPT_POST, 1L);
-  curl_easy_setopt(this->curl, CURLOPT_POSTFIELDS, hardcodedJson.c_str());
+  curl_easy_setopt(curl_, CURLOPT_URL, config::kLoginAccountUrl);
+  curl_easy_setopt(curl_, CURLOPT_POST, 1L);
+  curl_easy_setopt(curl_, CURLOPT_POSTFIELDS, payload.dump().c_str());
 
-  this->code = curl_easy_perform(this->curl);
-
-  if (this->code == CURLE_OK &&
-      this->response.find("redirectUrl") != string::npos) {
-    const json jsonResponse = json::parse(this->response);
-
-    if (jsonResponse["result"] == 1) {
-      cout << RED << " Account does not exist" << RESET << endl;
-      return false;
-    } else if (this->response.find("\"https://home.eset.com\"") !=
-               string::npos) {
-      cout << RED << " Error in PKCE callback" << RESET << endl;
-      return false;
-    }
-
-    string authLocationHeader = getPKCEResponse(this->response);
-
-    const string authLocation = getAuthLocation(this->responseHeaders);
-    const string code = getParameterValue(authLocation, "code");
-
-    if (!getAccessToken(code)) {
-      cout << RED << " Error getting JWT token" << RESET << endl;
-      return false;
-    }
-
-    return true;
+  const CURLcode result = perform();
+  if (result != CURLE_OK ||
+      response.find("redirectUrl") == std::string::npos) {
+    return false;
   }
-  return false;
+
+  const json answer = json::parse(response);
+  if (answer.value("result", 0) == 1) {
+    std::cout << RED << i18n::tr(i18n::Key::AccountDoesNotExist) << RESET
+              << std::endl;
+    return false;
+  }
+  if (response.find("\"https://home.eset.com\"") != std::string::npos) {
+    std::cout << RED << i18n::tr(i18n::Key::ErrorInPkceCallback) << RESET
+              << std::endl;
+    return false;
+  }
+
+  if (!resolveTokenFromRedirect(response)) {
+    std::cout << RED << i18n::tr(i18n::Key::ErrorGettingJwtToken) << RESET
+              << std::endl;
+    return false;
+  }
+
+  std::cout << GREEN << i18n::tr(i18n::Key::LoggedIn) << RESET << std::endl;
+  return true;
 }
 
-string Eset::getPKCEResponse(string response) {
-  this->response.clear();
+bool Eset::resolveTokenFromRedirect(const std::string &loginResponse) {
+  const std::string redirectHeaders = followPkceRedirect(loginResponse);
 
-  struct curl_slist *headers = NULL;
-  headers = curl_slist_append(
-      headers,
-      "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/"
-      "avif,image/webp,image/apng,*/*;q=0.8,application/"
-      "signed-exchange;v=b3;q=0.7");
-  curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+  const std::string location = locationHeader(redirectHeaders);
+  if (location.empty()) {
+    return false;
+  }
 
-  const json jsonResponse = json::parse(response);
+  const std::string code = queryParameter(location, "code");
+  if (code.empty()) {
+    return false;
+  }
 
-  string redirectUrl = jsonResponse["redirectUrl"];
-  redirectUrl =
-      "https://login.eset.com" + regex_replace(redirectUrl, regex(" "), "%20");
+  response.clear();
+  responseHeaders.clear();
 
-  curl_easy_setopt(this->curl, CURLOPT_URL, redirectUrl.c_str());
-  curl_easy_setopt(this->curl, CURLOPT_HTTPGET, 1L);
-  curl_easy_setopt(this->curl, CURLOPT_FOLLOWLOCATION, 1L);
+  useHeaders({"Content-Type: application/x-www-form-urlencoded"});
 
-  this->code = curl_easy_perform(this->curl);
+  const std::string tokenBody =
+      std::string("client_id=") + config::kPkceClientId + "&code=" + code +
+      "&redirect_uri=https%3A%2F%2Fhome.eset.com%2Fcallback&code_verifier=" +
+      pkce_.codeVerifier() + "&grant_type=authorization_code";
+
+  curl_easy_setopt(curl_, CURLOPT_URL, config::kTokenUrl);
+  curl_easy_setopt(curl_, CURLOPT_POST, 1L);
+  curl_easy_setopt(curl_, CURLOPT_POSTFIELDS, tokenBody.c_str());
+
+  if (perform() != CURLE_OK) {
+    return false;
+  }
+
+  token = json::parse(response).value("access_token", std::string());
+  if (token.empty()) {
+    return false;
+  }
 
   setHeaders();
-
-  return this->responseHeaders;
+  return true;
 }
 
-bool Eset::getAccessToken(string code) {
-  this->response.clear();
-  this->responseHeaders.clear();
+bool Eset::activateLicense() {
+  response.clear();
+  responseHeaders.clear();
 
-  struct curl_slist *headers = NULL;
-  headers = curl_slist_append(
-      headers, "Content-Type: application/x-www-form-urlencoded");
-  curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+  useHeaders({hostHeader(config::kEsetHomeHost),
+              "Content-type: application/json", "Accept: */*",
+              "x-eset-client-type: browser_desktop",
+              "x-eset-client-device-language: en-US",
+              "Referer: https://home.eset.com/onboarding/trial-subscription",
+              "Authorization: Bearer " + token});
 
-  const string tokenBody =
-      "client_id=myeset&code=" + code +
-      "&redirect_uri=https%3A%2F%2Fhome.eset.com%2Fcallback&code_verifier=" +
-      pkce.getCodeVerifier() + "&grant_type=authorization_code";
+  const std::string payload =
+      std::string("{\"productCode\":\"") + config::kTrialProductCode + "\"}";
 
-  curl_easy_setopt(this->curl, CURLOPT_URL, TOKEN.c_str());
-  curl_easy_setopt(this->curl, CURLOPT_POST, 1L);
-  curl_easy_setopt(this->curl, CURLOPT_POSTFIELDS, tokenBody.c_str());
+  curl_easy_setopt(curl_, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_2TLS);
+  curl_easy_setopt(curl_, CURLOPT_URL, config::kActivateTrialUrl);
+  curl_easy_setopt(curl_, CURLOPT_POST, 1L);
+  curl_easy_setopt(curl_, CURLOPT_POSTFIELDS, payload.c_str());
 
-  this->code = curl_easy_perform(this->curl);
+  const CURLcode result = perform();
 
-  if (this->code == CURLE_OK) {
-    const json jsonResponse = json::parse(this->response);
+  // A straight JSON answer means the trial was granted; an HTML error page
+  // means it was not.
+  return result == CURLE_OK && response.find("!DOCTYPE") == std::string::npos;
+}
 
-    string access_token = jsonResponse["access_token"];
+bool Eset::fetchLicenseKey() {
+  response.clear();
+  responseHeaders.clear();
 
-    this->token = access_token;
-    setHeaders();
-    return true;
+  useHeaders({hostHeader(config::kEsetHomeHost),
+              "Authorization: Bearer " + token});
+
+  curl_easy_setopt(curl_, CURLOPT_URL, config::kGetAllLicensesUrl);
+  curl_easy_setopt(curl_, CURLOPT_HTTPGET, 1L);
+
+  if (perform() != CURLE_OK) {
+    return false;
   }
 
-  return false;
-}
-
-string Eset::getAuthLocation(string header) {
-  std::size_t locationIndex = header.find("location: ");
-  if (locationIndex != std::string::npos) {
-    std::string locationSubstring = header.substr(locationIndex + 10);
-    return locationSubstring;
+  if (response.length() < 3) {
+    std::cout << RED << i18n::tr(i18n::Key::NoLicenseFound) << std::endl;
+    return false;
   }
-  return "";
+
+  // The endpoint answers with an array; an empty one has no key to read.
+  const json licenses = json::parse(response, nullptr, false);
+  if (licenses.is_discarded() || !licenses.is_array() || licenses.empty()) {
+    std::cout << RED << i18n::tr(i18n::Key::NoLicenseFound) << std::endl;
+    return false;
+  }
+
+  license_ = licenses[0].value("licenseKey", std::string());
+  if (license_.empty()) {
+    std::cout << RED << i18n::tr(i18n::Key::NoLicenseFound) << std::endl;
+    return false;
+  }
+
+  std::cout << GREEN << i18n::tr(i18n::Key::LabelLicense) << RESET << license_
+            << std::endl;
+  return true;
 }
 
-string Eset::getParameterValue(const std::string &url,
-                               const std::string &parameter) {
-  std::regex pattern(parameter + "=([^&]+)");
+void Eset::useLoginHeaders(bool forAccountCreation) {
+  const std::string referer =
+      forAccountCreation ? "Referer: https://login.eset.com/register/final-step"
+                         : "Referer: https://login.eset.com/login";
+
+  useHeaders({
+      hostHeader(config::kEsetLoginHost),
+      referer,
+      std::string("Accept: ") + kAcceptJson,
+      "Accept-Language: en-US,en;q=0.5",
+      "Accept-Encoding: gzip, deflate",
+      "X-Security-Request: required",
+      "Content-Type: application/json",
+      "Origin: https://login.eset.com",
+      "Connection: keep-alive",
+      "Upgrade-Insecure-Requests: 1",
+      std::string("Sec-Ch-Ua: ") + kSecChUa,
+      "Cache-Control: no-cache",
+      "TE: trailers",
+  });
+}
+
+void Eset::useHeaders(const std::vector<std::string> &lines) {
+  // Replace the whole list rather than appending to the installed one: the
+  // original reassigned `headers = NULL` without freeing, leaking every list
+  // it built, and then added the shared headers through Scrapper, which
+  // duplicated the user-agent on each call.
+  clearHeaders();
+  for (const std::string &line : lines) {
+    appendHeader(line);
+  }
+  Scrapper::setHeaders();
+  curl_easy_setopt(curl_, CURLOPT_HTTPHEADER, headers_);
+}
+
+std::string Eset::followPkceRedirect(const std::string &loginResponse) {
+  response.clear();
+
+  const json answer = json::parse(loginResponse);
+  std::string redirectUrl = answer.value("redirectUrl", std::string());
+  if (redirectUrl.empty()) {
+    return {};
+  }
+
+  redirectUrl = std::string(config::kPkceRedirectPrefix) +
+                std::regex_replace(redirectUrl, std::regex(" "), "%20");
+
+  useHeaders({std::string("Accept: ") + kAcceptHtml});
+  curl_easy_setopt(curl_, CURLOPT_URL, redirectUrl.c_str());
+  curl_easy_setopt(curl_, CURLOPT_HTTPGET, 1L);
+  curl_easy_setopt(curl_, CURLOPT_FOLLOWLOCATION, 1L);
+
+  perform();
+  return responseHeaders;
+}
+
+std::string Eset::extractVerificationLink(const std::string &body) {
+  // The mail client renders the link as "[url]".
+  static const std::regex linkPattern(R"(\[([^\]]+)\])");
   std::smatch match;
+  if (std::regex_search(body, match, linkPattern) && match.size() > 1) {
+    return match.str(1);
+  }
+  return {};
+}
 
+std::string Eset::locationHeader(const std::string &headers) {
+  // Scanned line by line rather than with a single case-insensitive regex.
+  //
+  // Two reasons: header names are case-insensitive, and the inline `(?i)` flag
+  // that would express that is not usable here -- libstdc++'s std::regex
+  // rejects or crashes on it depending on the toolchain, which took down the
+  // whole program at startup when it was used.
+  std::size_t lineStart = 0;
+  while (lineStart < headers.size()) {
+    std::size_t lineEnd = headers.find('\n', lineStart);
+    if (lineEnd == std::string::npos) {
+      lineEnd = headers.size();
+    }
+
+    std::string line = headers.substr(lineStart, lineEnd - lineStart);
+    // Tolerate CRLF.
+    while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) {
+      line.pop_back();
+    }
+
+    const std::size_t colon = line.find(':');
+    if (colon != std::string::npos) {
+      std::string name = line.substr(0, colon);
+      for (char &character : name) {
+        character = static_cast<char>(
+            std::tolower(static_cast<unsigned char>(character)));
+      }
+      if (name == "location") {
+        std::size_t valueStart = line.find_first_not_of(" \t", colon + 1);
+        if (valueStart != std::string::npos) {
+          return line.substr(valueStart);
+        }
+      }
+    }
+
+    lineStart = lineEnd + 1;
+  }
+  return {};
+}
+
+std::string Eset::queryParameter(const std::string &url,
+                                 const std::string &parameter) {
+  const std::regex pattern(parameter + "=([^&]+)");
+  std::smatch match;
   if (std::regex_search(url, match, pattern)) {
     return match[1];
   }
-
-  return "";
-}
-
-void Eset::setHeaders(bool create_account, bool hasLenght) {
-  headers = NULL;
-  headers = curl_slist_append(headers, "Host: login.eset.com");
-
-  if (create_account)
-    headers = curl_slist_append(
-        headers, "Referer: https://login.eset.com/register/final-step");
-  else {
-    headers =
-        curl_slist_append(headers, "Referer: https://login.eset.com/login");
-    if (hasLenght)
-      headers = curl_slist_append(headers, "Content-Length: 416"); // 420!!!
-  }
-
-  headers =
-      curl_slist_append(headers, "Accept: application/json, text/plain, */*");
-  headers = curl_slist_append(headers, "Accept-Language: en-US,en;q=0.5");
-  headers = curl_slist_append(headers, "Accept-Encoding: gzip, deflate");
-  headers = curl_slist_append(headers, "X-Security-Request: required");
-  headers = curl_slist_append(headers, "Content-Type: application/json");
-  headers = curl_slist_append(headers, "Origin: https://login.eset.com");
-  headers = curl_slist_append(headers, "Connection: keep-alive");
-  headers = curl_slist_append(headers, "Upgrade-Insecure-Requests: 1");
-  headers = curl_slist_append(
-      headers, "Sec-Ch-Ua: 'Chromium';v='121', 'Not A(Brand';v='99'");
-  headers = curl_slist_append(headers, "Cache-Control: no-cache");
-  headers = curl_slist_append(headers, "TE: trailers");
-  Scrapper::setHeaders();
+  return {};
 }

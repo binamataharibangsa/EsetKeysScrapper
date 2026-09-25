@@ -1,35 +1,70 @@
 #pragma once
 
 #include "Eset/Eset.h"
+#include "LicenseRecord.h"
 #include "ProxyReader.h"
 #include "TempMail/TempMail.h"
 
+#include <memory>
+#include <string>
+#include <vector>
+
+/// Orchestrates a run: creates the throwaway mailboxes, registers one ESET
+/// account per mailbox, waits for the confirmation mail and collects the
+/// resulting licence keys.
+///
+/// Results are exposed as `LicenseRecord` values rather than `Eset` objects,
+/// because an `Eset` owns a libcurl handle: the original returned
+/// `vector<Eset>` by value, so every element copy produced a second owner of
+/// the same handle and a double free at exit.
 class LicenseManager {
 public:
-  LicenseManager(int numLicenses, int domainLenght, string proxyFile);
-  ~LicenseManager();
+  /// `domainLength` is clamped to the bounds in `config`.
+  LicenseManager(int numLicenses, int domainLength, const std::string &proxyFile);
 
+  /// Runs the whole pipeline. Never throws for an individual account: a
+  /// failure is logged and the next account is attempted.
   void generateLicenses();
 
-  void showAllLicenses();
-  vector<Eset> getLicenses() { return licenses; }
+  /// Successful results, in the order they were produced.
+  const std::vector<LicenseRecord> &licenses() const noexcept {
+    return licenses_;
+  }
+
+  /// Prints every result and copies the first licence key to the clipboard.
+  void showAllLicenses() const;
 
 private:
-  int numLicenses = 1;
-  int domainLenght = 15;
+  /// Creates `numLicenses_` mailboxes, skipping any that cannot be registered.
+  void createMailboxes();
 
-  ProxyReader proxyReader;
-  bool useProxies = false;
+  /// Registers, confirms and mints a licence for one mailbox.
+  /// Returns true when a licence key was obtained.
+  bool processMailbox(TempMail &mailbox);
 
-  vector<unique_ptr<TempMail>> tempMails;
-  vector<Eset> licenses;
+  /// Polls the mailbox until the ESET confirmation mail arrives and has been
+  /// followed. Returns false once the attempt budget is exhausted.
+  bool waitForAccountActivation(TempMail &mailbox, Eset &eset);
 
-  void generateTempMails();
-  void waitForAccountActivation(unique_ptr<TempMail> &tempMail, Eset &eset);
-  bool confirmIfEsetMail(unique_ptr<TempMail> &tempMail, Eset &eset,
-                         Message &message);
+  /// True when `message` is the ESET confirmation mail and the confirmation
+  /// succeeded.
+  bool confirmIfEsetMail(TempMail &mailbox, Eset &eset,
+                         const Message &message);
 
-  void saveGeneratedData(const string &filename);
+  /// Picks a working proxy, or nullptr to go direct.
+  ///
+  /// Returns a pointer into `proxyReader_`, so the result is valid for the
+  /// lifetime of this manager.
+  const Proxy *acquireProxy();
 
-  void copyLicenseToClipboard();
+  /// Rewrites `config::kDataFileName` with one "mail,license" line per result.
+  void saveResults() const;
+
+  int numLicenses_ = 1;
+  int domainLength_ = 15;
+  bool useProxies_ = false;
+
+  ProxyReader proxyReader_;
+  std::vector<std::unique_ptr<TempMail>> mailboxes_;
+  std::vector<LicenseRecord> licenses_;
 };

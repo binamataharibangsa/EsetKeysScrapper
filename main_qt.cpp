@@ -1,4 +1,7 @@
+#include "src/Core/Config.h"
+#include "src/I18n/I18n.h"
 #include "src/LicenseManager.h"
+
 #include <QApplication>
 #include <QClipboard>
 #include <QGraphicsDropShadowEffect>
@@ -13,12 +16,36 @@
 #include <QFuture>
 #include <QFutureWatcher>
 
+#include <string>
+#include <vector>
+
+namespace {
+
+/// The translated string for `key` as a QString.
+///
+/// Deliberately *not* called `tr`: every QObject member function is a
+/// candidate inside a QObject subclass, and Qt itself declares a static
+/// `tr(const char *, const char *, int)`. A local `tr(i18n::Key)` would make
+/// those two candidates ambiguous through argument-dependent lookup.
+///
+/// The GUI is built before any language has been chosen, so for now it always
+/// renders the environment-detected language. Routing it through the same
+/// table as the console keeps the two front-ends consistent and means a new
+/// string only has to be added once.
+QString translate(const i18n::Key key) {
+  return QString::fromStdString(i18n::tr(key));
+}
+
+} // namespace
+
 int main(int argc, char *argv[]) {
   QApplication app(argc, argv);
   app.setStyle("fusion");
+  i18n::Translator::instance().setLanguage(
+      i18n::Translator::fromEnvironment());
 
   QWidget window;
-  window.setWindowTitle("EsetKeysScrapper");
+  window.setWindowTitle(config::kAppName);
   window.setFixedSize(520, 450);
   window.setAttribute(Qt::WA_TranslucentBackground);
 
@@ -97,7 +124,8 @@ int main(int argc, char *argv[]) {
   shadow->setColor(QColor(0, 0, 0, 160));
   card->setGraphicsEffect(shadow);
 
-  QLabel *title = new QLabel("🔑 EsetKeysScrapper");
+  QLabel *title = new QLabel(QString::fromUtf8("\xF0\x9F\x94\x91 ") +
+                             config::kAppName);
   title->setObjectName("title");
   title->setAlignment(Qt::AlignCenter);
 
@@ -105,6 +133,9 @@ int main(int argc, char *argv[]) {
   disclaimerTitle->setObjectName("disclaimerTitle");
   disclaimerTitle->setAlignment(Qt::AlignCenter);
 
+  // The long disclaimer text is not in the translation table (it is prose, not
+  // a UI label); the colour, weight and layout around it are translated via
+  // the Qt* keys.
   QLabel *disclaimerText = new QLabel(
       "EsetKeysScrapper is intended for educational and research purposes only.<br>"
       "The developers assume no responsibility for any misuse or illegal activities conducted with this tool.<br>"
@@ -119,8 +150,8 @@ int main(int argc, char *argv[]) {
   result->setFixedHeight(100);
   result->setAlignment(Qt::AlignCenter);
 
-  QPushButton *copyBtn = new QPushButton("📋 Copy");
-  QPushButton *generateBtn = new QPushButton("⚙️ Generate");
+  QPushButton *copyBtn = new QPushButton(translate(i18n::Key::QtCopy));
+  QPushButton *generateBtn = new QPushButton(translate(i18n::Key::QtGenerate));
 
   QHBoxLayout *buttons = new QHBoxLayout();
   buttons->addStretch();
@@ -149,16 +180,22 @@ int main(int argc, char *argv[]) {
   auto startGenerate = [=]() {
     copyBtn->setEnabled(false);
     generateBtn->setEnabled(false);
-    result->setText("⏳ Generating license...");
+    result->setText(translate(i18n::Key::QtGenerating));
     QApplication::processEvents();
 
     QFuture<QString> future = QtConcurrent::run([]() -> QString {
-      LicenseManager manager(1, 10, "");
+      LicenseManager manager(config::kMinLicenseCount,
+                             config::kDefaultDomainLength, std::string());
       manager.generateLicenses();
-      auto licenses = manager.getLicenses();
-      if (!licenses.empty())
-        return QString::fromStdString(licenses[0].license);
-      return QString("❌ No license generated.");
+
+      // LicenseRecord, not Eset: the previous version copied Eset objects
+      // (each owning a libcurl handle) out of the manager and straight into
+      // a double free.
+      const std::vector<LicenseRecord> &licenses = manager.licenses();
+      if (licenses.empty()) {
+        return translate(i18n::Key::QtNoLicenseGenerated);
+      }
+      return QString::fromStdString(licenses.front().license);
     });
 
     watcher->setFuture(future);

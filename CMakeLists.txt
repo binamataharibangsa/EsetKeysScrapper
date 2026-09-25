@@ -9,8 +9,19 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # Opción para controlar si se compila la versión Qt
 option(BUILD_QT_VERSION "Build Qt GUI version" ON)
 
-# Recopilar archivos fuente
-file(GLOB_RECURSE SRC_FILES src/*.cpp)
+# Opción para compilar las pruebas unitarias: por defecto OFF, para que una
+# compilación normal no dependa de ellas.
+option(BUILD_TESTS "Build unit tests" OFF)
+
+# Recopilar archivos fuente.
+# CONFIGURE_DEPENDS hace que CMake vuelva a ejecutarse cuando se añade o
+# elimina un archivo en src/, en lugar de quedarse con la lista del primer
+# configure.
+file(GLOB_RECURSE SRC_FILES CONFIGURE_DEPENDS src/*.cpp)
+
+# Todas las rutas del proyecto son relativas a la raíz ("Core/Config.h",
+# "Helpers/Console.h", ...), así que src/ tiene que estar en el include path.
+include_directories(${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
 # Buscar dependencias base (siempre necesarias)
 find_package(OpenSSL REQUIRED)
@@ -156,4 +167,30 @@ if(BUILD_QT_VERSION)
 else()
     message(STATUS "Versiones: Solo Console (sin Qt)")
 endif()
+
+# ================================
+# PRUEBAS
+# ================================
+if(BUILD_TESTS)
+    enable_testing()
+
+    # La prueba de i18n no necesita Qt ni cURL: solo la tabla de traducciones.
+    add_executable(${PROJECT_NAME}I18nTest
+        tests/i18n_test.cpp
+        src/I18n/I18n.cpp
+        src/Core/Environment.h
+    )
+    target_include_directories(${PROJECT_NAME}I18nTest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+    set_target_properties(${PROJECT_NAME}I18nTest PROPERTIES
+        OUTPUT_NAME "EsetKeysI18nTest"
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+    )
+
+    add_test(NAME i18n COMMAND ${PROJECT_NAME}I18nTest)
+    message(STATUS "Pruebas: activadas (BUILD_TESTS=ON)")
+endif()
+
 message(STATUS "====================================")

@@ -1,4 +1,8 @@
 /build
+/build-verify
 /data
 win-build/
 build_qt/
+
+# Metadatos del asistente (memoria de proyecto, skills); no es código.
+/.workbuddy-ai/

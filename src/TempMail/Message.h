@@ -1,19 +1,15 @@
-#include "../Proxy.h"
-#include "../Scrapper.h"
+#pragma once
 
+#include <string>
+
+/// One message as returned by the mail.tm listing endpoint.
 struct Message {
-  string id;
-  string from;
-  string subject;
-  string body;
+  std::string id;
+  std::string from;
+  std::string subject;
+  std::string body;
   bool read = false;
 
-  void print() {
-    string read = this->read ? "Yes" : "No";
-    cout << "\033[1;33mID: \033[0m" << id << endl;
-    cout << "\033[1;33mRead: \033[0m" << read << endl;
-    cout << "\033[1;33mFrom: \033[0m" << from << endl;
-    cout << "\033[1;33mSubject: \033[0m" << subject << endl;
-    cout << "\033[1;33mBody: \033[0m" << body << endl;
-  }
+  /// Dumps the message to stdout using the translated field labels.
+  void print() const;
 };
